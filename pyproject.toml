@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "torch>=2.7", "pybind11>=2.13"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mega-kernel-qwen36"
+version = "0.1.0"
+description = "Decode-path CUDA kernels and references for Qwen3.6-35B-A3B"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ninja>=1.11",
+    "pytest>=8",
+    "pybind11>=2.13",
+    "transformers>=4.57.1",
+    "huggingface_hub>=0.30",
+    "safetensors>=0.5",
+]
+
+[tool.setuptools.packages.find]
+include = ["mega_kernel_qwen36*"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
