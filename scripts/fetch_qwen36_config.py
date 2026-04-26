@@ -31,6 +31,20 @@ def main() -> None:
         "moe_intermediate_size": text.get("moe_intermediate_size"),
         "max_position_embeddings": text["max_position_embeddings"],
     }
+    vision = config.get("vision_config")
+    if vision is not None:
+        summary["vision"] = {
+            "depth": vision["depth"],
+            "hidden_size": vision["hidden_size"],
+            "intermediate_size": vision["intermediate_size"],
+            "num_heads": vision["num_heads"],
+            "patch_size": vision["patch_size"],
+            "temporal_patch_size": vision["temporal_patch_size"],
+            "spatial_merge_size": vision["spatial_merge_size"],
+            "out_hidden_size": vision["out_hidden_size"],
+            "num_position_embeddings": vision["num_position_embeddings"],
+            "deepstack_visual_indexes": vision.get("deepstack_visual_indexes", []),
+        }
     print(json.dumps(summary, indent=2, sort_keys=True))
 
 

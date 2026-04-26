@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import mega_kernel_qwen36 as mk
-from tests.test_reference import _small_dense, _small_moe
+from tests.test_reference import _small_dense, _small_moe, _small_vision
 
 
 pytestmark = pytest.mark.skipif(
@@ -15,9 +15,9 @@ def _assert_close_bf16(actual, expected, atol=3e-2, rtol=5e-2):
     torch.testing.assert_close(actual.float(), expected.float(), atol=atol, rtol=rtol)
 
 
-def test_h100_capability_smoke():
+def test_cuda_capability_smoke():
     major, minor = torch.cuda.get_device_capability()
-    assert (major, minor) == (9, 0)
+    assert (major, minor) in {(9, 0), (12, 0)}
 
 
 @pytest.mark.parametrize("batch", [1, 2, 4, 8])
@@ -91,3 +91,46 @@ def test_linear_attention_decode_cuda_matches_reference():
     )
     _assert_close_bf16(out.cpu(), ref_out)
     torch.testing.assert_close(new_state.cpu(), ref_state, atol=3e-2, rtol=5e-2)
+
+
+def test_vision_attention_sdpa_cuda_matches_reference():
+    cfg, grid_thw, pixel_values, weights = _small_vision(device="cuda", dtype=torch.bfloat16)
+    hidden = mk.vision_patch_embed(pixel_values, weights.patch_embed, config=cfg)
+    from mega_kernel_qwen36.reference import vision_make_cu_seqlens, vision_rotary_position_embeddings_reference
+
+    cos, sin = vision_rotary_position_embeddings_reference(
+        grid_thw,
+        head_dim=cfg.head_dim,
+        spatial_merge_size=cfg.spatial_merge_size,
+    )
+    cos = cos.to(dtype=hidden.dtype)
+    sin = sin.to(dtype=hidden.dtype)
+    cu = vision_make_cu_seqlens(grid_thw)
+    out = mk.vision_attention_encode(hidden, weights.blocks[0].attention, cu, cos, sin, num_heads=cfg.num_heads)
+    ref = mk.vision_attention_encode(
+        hidden,
+        weights.blocks[0].attention,
+        cu,
+        cos,
+        sin,
+        num_heads=cfg.num_heads,
+        backend="reference",
+    )
+    _assert_close_bf16(out, ref)
+
+
+def test_vision_patch_merger_triton_cuda_matches_reference():
+    pytest.importorskip("triton")
+    cfg, _, _, weights = _small_vision(device="cuda", dtype=torch.bfloat16)
+    hidden = (torch.randn(16, cfg.hidden_size, device="cuda") * 0.04).bfloat16()
+    out = mk.vision_patch_merger(hidden, weights.merger, backend="triton")
+    ref = mk.vision_patch_merger(hidden, weights.merger, backend="reference")
+    _assert_close_bf16(out, ref)
+
+
+def test_vision_encode_cuda_matches_reference():
+    cfg, grid_thw, pixel_values, weights = _small_vision(device="cuda", dtype=torch.bfloat16)
+    out = mk.vision_encode(pixel_values, grid_thw, weights, config=cfg)
+    ref = mk.vision_encode(pixel_values, grid_thw, weights, config=cfg, backend="reference")
+    assert out.hidden.shape == (4, cfg.out_hidden_size)
+    _assert_close_bf16(out.hidden, ref.hidden)

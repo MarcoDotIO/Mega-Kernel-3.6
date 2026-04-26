@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 
-from .config import qwen36_layer_type
+from .config import Qwen36VisionConfig, qwen36_27b_vision_config, qwen36_layer_type
 from .reference import (
     apply_partial_rope,
     dense_ffn_decode_reference,
     full_attention_decode_reference,
+    layer_norm_reference,
     linear_attention_decode_reference,
     moe_decode_reference,
+    vision_attention_encode_reference,
+    vision_encoder_block_reference,
+    vision_fast_pos_embed_interpolate_reference,
+    vision_make_cu_seqlens,
+    vision_mlp_encode_reference,
+    vision_patch_embed_reference,
+    vision_patch_merger_reference,
+    vision_rotary_position_embeddings_reference,
 )
 
 try:
@@ -62,6 +72,57 @@ class LinearAttentionInputs:
 
 
 @dataclass(frozen=True)
+class VisionPatchEmbedWeights:
+    proj_weight: torch.Tensor
+    proj_bias: torch.Tensor
+
+
+@dataclass(frozen=True)
+class VisionAttentionWeights:
+    qkv_weight: torch.Tensor
+    qkv_bias: torch.Tensor
+    proj_weight: torch.Tensor
+    proj_bias: torch.Tensor
+
+
+@dataclass(frozen=True)
+class VisionMlpWeights:
+    fc1_weight: torch.Tensor
+    fc1_bias: torch.Tensor
+    fc2_weight: torch.Tensor
+    fc2_bias: torch.Tensor
+
+
+@dataclass(frozen=True)
+class VisionPatchMergerWeights:
+    norm_weight: torch.Tensor
+    norm_bias: torch.Tensor
+    fc1_weight: torch.Tensor
+    fc1_bias: torch.Tensor
+    fc2_weight: torch.Tensor
+    fc2_bias: torch.Tensor
+
+
+@dataclass(frozen=True)
+class VisionBlockWeights:
+    norm1_weight: torch.Tensor
+    norm1_bias: torch.Tensor
+    attention: VisionAttentionWeights
+    norm2_weight: torch.Tensor
+    norm2_bias: torch.Tensor
+    mlp: VisionMlpWeights
+
+
+@dataclass(frozen=True)
+class VisionEncoderWeights:
+    patch_embed: VisionPatchEmbedWeights
+    pos_embed_weight: torch.Tensor
+    blocks: Sequence[VisionBlockWeights]
+    merger: VisionPatchMergerWeights
+    deepstack_mergers: Sequence[VisionPatchMergerWeights] = ()
+
+
+@dataclass(frozen=True)
 class DecodeLayerResult:
     hidden: torch.Tensor
     router_indices: Optional[torch.Tensor] = None
@@ -69,6 +130,12 @@ class DecodeLayerResult:
     attention_output: Optional[torch.Tensor] = None
     linear_output: Optional[torch.Tensor] = None
     linear_state: Optional[torch.Tensor] = None
+
+
+@dataclass(frozen=True)
+class VisionEncoderResult:
+    hidden: torch.Tensor
+    deepstack_features: tuple[torch.Tensor, ...] = ()
 
 
 def extension_available() -> bool:
@@ -180,6 +247,298 @@ def linear_attention_decode(inputs: LinearAttentionInputs) -> tuple[torch.Tensor
             float(inputs.decay),
         )
     return linear_attention_decode_reference(inputs.q, inputs.k, inputs.v, inputs.state, decay=inputs.decay)
+
+
+def _layer_norm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    *,
+    eps: float,
+    backend: str,
+) -> torch.Tensor:
+    if backend == "triton":
+        from .triton_ops import layer_norm_triton
+
+        return layer_norm_triton(x, weight, bias, eps)
+    if backend == "reference":
+        return layer_norm_reference(x, weight, bias, eps=eps)
+    return F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
+
+
+def vision_patch_embed(
+    pixel_values: torch.Tensor,
+    weights: VisionPatchEmbedWeights,
+    *,
+    config: Optional[Qwen36VisionConfig] = None,
+    backend: str = "auto",
+) -> torch.Tensor:
+    if backend not in {"auto", "torch", "reference"}:
+        raise ValueError("backend must be one of: auto, torch, reference")
+    cfg = config or qwen36_27b_vision_config()
+    if backend == "reference":
+        return vision_patch_embed_reference(
+            pixel_values,
+            weights.proj_weight,
+            weights.proj_bias,
+            in_channels=cfg.in_channels,
+            temporal_patch_size=cfg.temporal_patch_size,
+            patch_size=cfg.patch_size,
+        )
+    patches = pixel_values.view(-1, cfg.in_channels, cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size)
+    return F.conv3d(patches.to(dtype=weights.proj_weight.dtype), weights.proj_weight, weights.proj_bias).view(
+        -1, weights.proj_weight.shape[0]
+    )
+
+
+def vision_attention_encode(
+    hidden_states: torch.Tensor,
+    weights: VisionAttentionWeights,
+    cu_seqlens: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    scale: Optional[float] = None,
+    backend: str = "auto",
+) -> torch.Tensor:
+    if backend not in {"auto", "sdpa", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    if backend == "reference":
+        return vision_attention_encode_reference(
+            hidden_states,
+            weights.qkv_weight,
+            weights.qkv_bias,
+            weights.proj_weight,
+            weights.proj_bias,
+            cu_seqlens,
+            cos,
+            sin,
+            num_heads=num_heads,
+            scale=scale,
+        )
+
+    seq_length, hidden_size = hidden_states.shape
+    head_dim = hidden_size // num_heads
+    qkv = F.linear(hidden_states, weights.qkv_weight, weights.qkv_bias)
+    qkv = qkv.reshape(seq_length, 3, num_heads, head_dim).permute(1, 0, 2, 3)
+    query, key, value = qkv.unbind(0)
+    query, key = _apply_rotary_pos_emb_vision(query, key, cos, sin)
+
+    cu = cu_seqlens.detach().cpu().tolist()
+    outputs = []
+    for start, end in zip(cu[:-1], cu[1:]):
+        q = query[start:end].transpose(0, 1).unsqueeze(0)
+        k = key[start:end].transpose(0, 1).unsqueeze(0)
+        v = value[start:end].transpose(0, 1).unsqueeze(0)
+        if scale is None:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False, scale=scale)
+        outputs.append(out.squeeze(0).transpose(0, 1))
+    attn = torch.cat(outputs, dim=0).reshape(seq_length, hidden_size)
+    return F.linear(attn, weights.proj_weight, weights.proj_bias)
+
+
+def _apply_rotary_pos_emb_vision(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    q_dtype = q.dtype
+    k_dtype = k.dtype
+    q_f = q.float()
+    k_f = k.float()
+    cos_f = cos.to(device=q.device).unsqueeze(-2).float()
+    sin_f = sin.to(device=q.device).unsqueeze(-2).float()
+    q_half = torch.cat((-q_f[..., q.shape[-1] // 2 :], q_f[..., : q.shape[-1] // 2]), dim=-1)
+    k_half = torch.cat((-k_f[..., k.shape[-1] // 2 :], k_f[..., : k.shape[-1] // 2]), dim=-1)
+    return (q_f * cos_f + q_half * sin_f).to(q_dtype), (k_f * cos_f + k_half * sin_f).to(k_dtype)
+
+
+def vision_mlp_encode(
+    hidden_states: torch.Tensor,
+    weights: VisionMlpWeights,
+    *,
+    hidden_act: str = "gelu_pytorch_tanh",
+    backend: str = "auto",
+) -> torch.Tensor:
+    if backend not in {"auto", "torch", "reference"}:
+        raise ValueError("backend must be one of: auto, torch, reference")
+    if backend == "reference":
+        return vision_mlp_encode_reference(
+            hidden_states,
+            weights.fc1_weight,
+            weights.fc1_bias,
+            weights.fc2_weight,
+            weights.fc2_bias,
+            hidden_act=hidden_act,
+        )
+    x = F.linear(hidden_states, weights.fc1_weight, weights.fc1_bias)
+    if hidden_act == "gelu_pytorch_tanh":
+        x = F.gelu(x, approximate="tanh")
+    elif hidden_act == "gelu":
+        x = F.gelu(x)
+    else:
+        raise ValueError(f"unsupported vision activation: {hidden_act}")
+    return F.linear(x, weights.fc2_weight, weights.fc2_bias)
+
+
+def vision_patch_merger(
+    hidden_states: torch.Tensor,
+    weights: VisionPatchMergerWeights,
+    *,
+    use_postshuffle_norm: bool = False,
+    eps: float = 1e-6,
+    backend: str = "auto",
+) -> torch.Tensor:
+    if backend not in {"auto", "torch", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, torch, triton, reference")
+    if backend == "reference":
+        return vision_patch_merger_reference(
+            hidden_states,
+            weights.norm_weight,
+            weights.norm_bias,
+            weights.fc1_weight,
+            weights.fc1_bias,
+            weights.fc2_weight,
+            weights.fc2_bias,
+            use_postshuffle_norm=use_postshuffle_norm,
+            eps=eps,
+        )
+    norm_backend = "triton" if backend == "triton" and hidden_states.is_cuda else "auto"
+    merged_hidden = weights.fc1_weight.shape[1]
+    if use_postshuffle_norm:
+        x = hidden_states.view(-1, merged_hidden)
+        x = _layer_norm(x, weights.norm_weight, weights.norm_bias, eps=eps, backend=norm_backend)
+    else:
+        x = _layer_norm(hidden_states, weights.norm_weight, weights.norm_bias, eps=eps, backend=norm_backend)
+        x = x.view(-1, merged_hidden)
+    x = F.linear(x, weights.fc1_weight, weights.fc1_bias)
+    x = F.gelu(x)
+    return F.linear(x, weights.fc2_weight, weights.fc2_bias)
+
+
+def vision_encoder_block(
+    hidden_states: torch.Tensor,
+    weights: VisionBlockWeights,
+    cu_seqlens: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    *,
+    num_heads: int,
+    hidden_act: str = "gelu_pytorch_tanh",
+    eps: float = 1e-6,
+    backend: str = "auto",
+) -> torch.Tensor:
+    if backend not in {"auto", "sdpa", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    if backend == "reference":
+        return vision_encoder_block_reference(
+            hidden_states,
+            weights.norm1_weight,
+            weights.norm1_bias,
+            weights.attention.qkv_weight,
+            weights.attention.qkv_bias,
+            weights.attention.proj_weight,
+            weights.attention.proj_bias,
+            weights.norm2_weight,
+            weights.norm2_bias,
+            weights.mlp.fc1_weight,
+            weights.mlp.fc1_bias,
+            weights.mlp.fc2_weight,
+            weights.mlp.fc2_bias,
+            cu_seqlens,
+            cos,
+            sin,
+            num_heads=num_heads,
+            hidden_act=hidden_act,
+            eps=eps,
+        )
+
+    norm_backend = "triton" if backend == "triton" and hidden_states.is_cuda else "auto"
+    normed = _layer_norm(hidden_states, weights.norm1_weight, weights.norm1_bias, eps=eps, backend=norm_backend)
+    hidden_states = hidden_states + vision_attention_encode(
+        normed,
+        weights.attention,
+        cu_seqlens,
+        cos,
+        sin,
+        num_heads=num_heads,
+        backend="sdpa",
+    )
+    normed = _layer_norm(hidden_states, weights.norm2_weight, weights.norm2_bias, eps=eps, backend=norm_backend)
+    hidden_states = hidden_states + vision_mlp_encode(normed, weights.mlp, hidden_act=hidden_act)
+    return hidden_states
+
+
+def vision_encode(
+    pixel_values: torch.Tensor,
+    grid_thw: torch.Tensor,
+    weights: VisionEncoderWeights,
+    *,
+    config: Optional[Qwen36VisionConfig] = None,
+    eps: float = 1e-6,
+    backend: str = "auto",
+) -> VisionEncoderResult:
+    if backend not in {"auto", "sdpa", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    cfg = config or qwen36_27b_vision_config()
+    grid_thw = grid_thw.to(device=pixel_values.device)
+
+    hidden_states = vision_patch_embed(pixel_values, weights.patch_embed, config=cfg, backend="reference" if backend == "reference" else "auto")
+    pos_embeds = vision_fast_pos_embed_interpolate_reference(
+        grid_thw,
+        weights.pos_embed_weight,
+        spatial_merge_size=cfg.spatial_merge_size,
+        num_position_embeddings=cfg.num_position_embeddings,
+    )
+    hidden_states = hidden_states + pos_embeds.to(device=hidden_states.device, dtype=hidden_states.dtype)
+    cos, sin = vision_rotary_position_embeddings_reference(
+        grid_thw,
+        head_dim=cfg.head_dim,
+        spatial_merge_size=cfg.spatial_merge_size,
+    )
+    cos = cos.to(device=hidden_states.device, dtype=hidden_states.dtype)
+    sin = sin.to(device=hidden_states.device, dtype=hidden_states.dtype)
+    cu_seqlens = vision_make_cu_seqlens(grid_thw)
+
+    deepstack_features = []
+    for layer_idx, block_weights in enumerate(weights.blocks):
+        hidden_states = vision_encoder_block(
+            hidden_states,
+            block_weights,
+            cu_seqlens,
+            cos,
+            sin,
+            num_heads=cfg.num_heads,
+            hidden_act=cfg.hidden_act,
+            eps=eps,
+            backend=backend,
+        )
+        if layer_idx in cfg.deepstack_visual_indexes:
+            merger_idx = cfg.deepstack_visual_indexes.index(layer_idx)
+            if merger_idx >= len(weights.deepstack_mergers):
+                raise ValueError("missing deepstack merger weights")
+            deepstack_features.append(
+                vision_patch_merger(
+                    hidden_states,
+                    weights.deepstack_mergers[merger_idx],
+                    use_postshuffle_norm=True,
+                    eps=eps,
+                    backend="reference" if backend == "reference" else ("triton" if backend == "triton" else "auto"),
+                )
+            )
+
+    hidden_states = vision_patch_merger(
+        hidden_states,
+        weights.merger,
+        use_postshuffle_norm=False,
+        eps=eps,
+        backend="reference" if backend == "reference" else ("triton" if backend == "triton" else "auto"),
+    )
+    return VisionEncoderResult(hidden=hidden_states, deepstack_features=tuple(deepstack_features))
 
 
 def decode_layer(

@@ -39,3 +39,20 @@ def test_qwen36_27b_config_values():
     assert cfg.linear_num_value_heads == 48
     assert cfg.layer_types[3] == "full_attention"
     assert cfg.layer_types[4] == "linear_attention"
+
+
+def test_qwen36_27b_vision_config_values():
+    cfg = mk.qwen36_27b_vision_config()
+    assert cfg.model_name == "Qwen/Qwen3.6-27B"
+    assert cfg.depth == 27
+    assert cfg.hidden_size == 1152
+    assert cfg.intermediate_size == 4304
+    assert cfg.num_heads == 16
+    assert cfg.head_dim == 72
+    assert cfg.patch_size == 16
+    assert cfg.temporal_patch_size == 2
+    assert cfg.spatial_merge_size == 2
+    assert cfg.merged_hidden_size == 4608
+    assert cfg.out_hidden_size == 5120
+    assert cfg.num_position_embeddings == 2304
+    assert cfg.deepstack_visual_indexes == ()

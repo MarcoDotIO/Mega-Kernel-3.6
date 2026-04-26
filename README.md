@@ -1,7 +1,8 @@
 # Mega Kernel Qwen3.6
 
-CUDA/Triton decode-path kernels and PyTorch references for Qwen3.6 text
-models, with `Qwen/Qwen3.6-27B` as the primary dense target and
+CUDA/Triton decode-path kernels plus optimized vision-encoder forward
+primitives and PyTorch references for Qwen3.6 models, with
+`Qwen/Qwen3.6-27B` as the primary dense/VL target and
 `Qwen/Qwen3.6-35B-A3B` MoE support kept available.
 
 The implementation targets single-GPU Qwen3.6 decode on H100 and RTX PRO 6000
@@ -13,6 +14,10 @@ Blackwell-class GPUs and exposes:
 - `full_attention_decode`: one-token GQA attention over an existing KV cache.
 - `linear_attention_decode`: FP32 recurrent-state linear attention primitive.
 - `decode_layer`: small Python dispatcher for the Qwen3.6 layer pattern.
+- `vision_patch_embed`, `vision_attention_encode`, `vision_mlp_encode`,
+  `vision_patch_merger`, `vision_encoder_block`, and `vision_encode`:
+  Qwen3.6-27B vision encoder forward primitives with SDPA attention and
+  optional Triton LayerNorm.
 
 ## Viper Setup
 
@@ -54,12 +59,14 @@ PY
 ## Benchmarks
 
 The benchmark defaults use smaller synthetic dimensions so they are fast during
-kernel iteration. Pass `--official` for Qwen3.6-35B-A3B dimensions.
+kernel iteration. Pass `--official` for official Qwen3.6 dimensions.
 
 ```bash
 python benchmarks/bench_moe.py
 python benchmarks/bench_dense_ffn.py
 python benchmarks/bench_attention.py --seq-len 32768
+python benchmarks/bench_vision_encoder.py --mode block
+python benchmarks/bench_vision_encoder.py --official --height 32 --width 32 --mode block
 ```
 
 ## Runtime Parity
@@ -108,9 +115,9 @@ PyTorch 2.7.0, BF16 inputs, and `TORCH_CUDA_ARCH_LIST="9.0;12.0"`.
 ## Verified Qwen3.6-27B / Runtime Parity Update
 
 Measured on the same H100 after adding `Qwen/Qwen3.6-27B`, `sm_120`, Triton
-RMSNorm, and runtime parity hooks.
+RMSNorm/LayerNorm, vision encoder primitives, and runtime parity hooks.
 
-- Core tests: `22 passed, 4 skipped`.
+- Core tests: `31 passed, 4 skipped`.
 - Runtime parity tests with `vllm 0.19.1` and `sglang 0.5.10.post1`:
   `3 passed, 1 skipped`.
 - Passed parity: vLLM RMSNorm, SGLang RMSNorm, and vLLM Triton decode attention.
@@ -119,3 +126,10 @@ RMSNorm, and runtime parity hooks.
 - Qwen3.6-27B official dense FFN synthetic, batch 1: `2.9157 ms`, `0.50x`;
   this CUDA path is correctness-first and still needs tensor-core matmul tiling.
 - Full attention decode, 32K context: `0.7420 ms`, `2.53x`.
+- Qwen3.6-27B official vision attention, 32x32 grid: `0.2156 ms`, `3.72x`.
+- Qwen3.6-27B official vision block, 32x32 grid: `0.3052 ms`, `5.42x`.
+- Qwen3.6-27B official 27-layer vision encoder wrapper, 32x32 grid:
+  `9.0645 ms`, `5.12x`.
+- Triton LayerNorm vision block path is numerically correct but measured slower
+  than the PyTorch LayerNorm path on H100 for the 1152-wide official block:
+  `0.3376 ms`, `4.89x`.
