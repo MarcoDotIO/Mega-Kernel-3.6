@@ -283,8 +283,8 @@ def moe_decode(
     add_residual: bool = True,
     backend: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if backend not in {"auto", "cuda", "grouped", "reference"}:
-        raise ValueError("backend must be one of: auto, cuda, grouped, reference")
+    if backend not in {"auto", "cuda", "persistent", "grouped", "reference"}:
+        raise ValueError("backend must be one of: auto, cuda, persistent, grouped, reference")
     tensors = (
         x,
         weights.norm_weight,
@@ -300,6 +300,10 @@ def moe_decode(
         return _moe_decode_grouped_torch(x, weights, eps=eps, top_k=top_k, add_residual=add_residual)
     if backend == "grouped":
         return _moe_decode_grouped_torch(x, weights, eps=eps, top_k=top_k, add_residual=add_residual)
+    if backend == "persistent" and _use_extension(*tensors) and hasattr(_C, "moe_decode_persistent"):
+        return _C.moe_decode_persistent(*tensors, float(eps), int(top_k), bool(add_residual))
+    if backend == "persistent":
+        raise RuntimeError("persistent CUDA extension is unavailable for moe_decode")
     if backend in {"auto", "cuda"} and _use_extension(*tensors):
         return _C.moe_decode(*tensors, float(eps), int(top_k), bool(add_residual))
     if backend == "cuda":

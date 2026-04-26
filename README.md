@@ -6,7 +6,16 @@ primitives and PyTorch references for Qwen3.6 models, with
 `Qwen/Qwen3.6-35B-A3B` MoE support kept available.
 
 The implementation targets single-GPU Qwen3.6 decode on H100 and RTX PRO 6000
-Blackwell-class GPUs and exposes:
+Blackwell-class GPUs. It now has two layers:
+
+- MPK-style planning: `TaskGraph`, SM-level task/event IR, graph normalization,
+  event fusion, launch linearization, batch-specialized plans, and Mirage
+  skeleton export.
+- Kernel implementations: legacy per-stage CUDA kernels, faster PyTorch/Triton
+  prototype backends, and a persistent MoE prototype whose internal stages are
+  `__device__` tasks under one `__global__` mega-kernel entrypoint.
+
+The public runtime APIs expose:
 
 - `dense_ffn_decode`: RMSNorm, dense SwiGLU FFN, and residual for
   `Qwen/Qwen3.6-27B`. The default CUDA path uses tensor-core-friendly PyTorch
@@ -14,7 +23,9 @@ Blackwell-class GPUs and exposes:
   `backend="cuda"`.
 - `moe_decode`: RMSNorm, router top-k, routed MoE, shared expert, and FFN residual.
   The default CUDA path uses a grouped/batched tensor-core prototype; the
-  original scalar CUDA extension remains available with `backend="cuda"`.
+  original scalar CUDA extension remains available with `backend="cuda"`, and
+  the MPK-shaped single-launch prototype is available with
+  `backend="persistent"`.
 - `full_attention_decode`: one-token GQA attention over an existing KV cache.
 - `linear_attention_decode`: FP32 recurrent-state linear attention primitive.
 - `decode_layer`: small Python dispatcher for the Qwen3.6 layer pattern.
@@ -68,12 +79,36 @@ kernel iteration. Pass `--official` for official Qwen3.6 dimensions.
 ```bash
 python benchmarks/bench_moe.py
 python benchmarks/bench_moe.py --official --backend auto --cuda-graph
+python benchmarks/bench_moe.py --backend persistent
 python benchmarks/bench_dense_ffn.py
 python benchmarks/bench_dense_ffn.py --official --backend auto --cuda-graph
 python benchmarks/bench_attention.py --seq-len 32768
 python benchmarks/bench_attention.py --seq-len 32768 --cuda-graph
 python benchmarks/bench_vision_encoder.py --mode block
 python benchmarks/bench_vision_encoder.py --official --height 32 --width 32 --mode block
+```
+
+## MPK / Mirage Shape
+
+The paper-backed direction is not to write every stage as its own `__global__`
+kernel. The MPK-style path is:
+
+1. Lower Qwen layers into a fine-grained task graph where tasks are SM-sized
+   units and events encode task dependencies.
+2. Normalize and fuse equivalent events to avoid unnecessary barriers.
+3. Linearize the graph into AOT/JIT task launches for worker and scheduler SMs.
+4. Execute task bodies inside a single persistent kernel, with task functions as
+   `__device__` routines rather than standalone CUDA launches.
+5. Optionally export a Mirage `PersistentKernel` skeleton for a future native
+   MPK backend.
+
+Inspect the current tGraph:
+
+```bash
+python scripts/inspect_mpk_plan.py --model 27b --layers 4
+python scripts/inspect_mpk_plan.py --model 35b-a3b --layers 1
+python scripts/inspect_mpk_plan.py --model vision --layers 2
+python scripts/inspect_mpk_plan.py --model 27b --layers 1 --mirage-skeleton
 ```
 
 ## Runtime Parity
@@ -130,7 +165,7 @@ Measured on the same H100 after adding `Qwen/Qwen3.6-27B`, `sm_120`, Triton
 RMSNorm/LayerNorm, grouped decode backends, vision encoder primitives, CUDA
 Graph benchmark replay, and runtime parity hooks.
 
-- Core tests: `50 passed, 6 skipped`.
+- Core tests: `59 passed, 6 skipped`.
 - Transformers architecture parity: `2 passed`.
 - Runtime parity tests with `vllm 0.19.1` and `sglang 0.5.10.post1`:
   `3 passed, 1 skipped`.
@@ -141,6 +176,10 @@ Graph benchmark replay, and runtime parity hooks.
   `0.3546 ms`, `2.31x`; with CUDA Graph replay: `0.2511 ms`, `3.16x`.
 - Qwen3.6-35B-A3B official MoE synthetic, batch 1, old scalar CUDA backend:
   `1.2491 ms`, `0.64x`.
+- Qwen3.6-35B-A3B official MoE synthetic, batch 1, single-launch persistent
+  prototype: `18.2959 ms`, `0.04x`; this path is architecture-correct for
+  MPK-style task execution but not performance-ready until the task bodies are
+  replaced with tiled tensor-core worker tasks.
 - Qwen3.6-27B official dense FFN synthetic, batch 1, default torch backend:
   `0.2708 ms`, `5.37x`; with CUDA Graph replay: `0.2133 ms`, `6.84x`.
 - Qwen3.6-27B official dense FFN synthetic, batch 1, old scalar CUDA backend:

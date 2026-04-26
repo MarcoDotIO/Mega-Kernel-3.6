@@ -21,7 +21,7 @@ def test_cuda_capability_smoke():
 
 
 @pytest.mark.parametrize("batch", [1, 2, 4, 8])
-@pytest.mark.parametrize("backend", ["auto", "grouped", "cuda"])
+@pytest.mark.parametrize("backend", ["auto", "grouped", "persistent", "cuda"])
 def test_moe_decode_cuda_matches_reference(batch, backend):
     x, weights, top_k = _small_moe(device="cuda", dtype=torch.bfloat16)
     x = x[:1].repeat(batch, 1).contiguous()

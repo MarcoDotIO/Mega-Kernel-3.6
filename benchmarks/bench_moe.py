@@ -54,7 +54,7 @@ def main():
     parser.add_argument("--scale", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--official", action="store_true")
-    parser.add_argument("--backend", choices=["auto", "grouped", "cuda", "reference"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "grouped", "persistent", "cuda", "reference"], default="auto")
     parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--iters", type=int, default=50)
     args = parser.parse_args()
