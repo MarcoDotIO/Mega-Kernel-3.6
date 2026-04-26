@@ -12,8 +12,8 @@ Blackwell-class GPUs. It now has two layers:
   event fusion, launch linearization, batch-specialized plans, and Mirage
   skeleton export.
 - Kernel implementations: legacy per-stage CUDA kernels, faster PyTorch/Triton
-  prototype backends, and a persistent MoE prototype whose internal stages are
-  `__device__` tasks under one `__global__` mega-kernel entrypoint.
+  prototype backends, and a cooperative persistent MoE prototype whose internal
+  stages are `__device__` tasks under one `__global__` mega-kernel entrypoint.
 
 The public runtime APIs expose:
 
@@ -177,9 +177,13 @@ Graph benchmark replay, and runtime parity hooks.
 - Qwen3.6-35B-A3B official MoE synthetic, batch 1, old scalar CUDA backend:
   `1.2491 ms`, `0.64x`.
 - Qwen3.6-35B-A3B official MoE synthetic, batch 1, single-launch persistent
-  prototype: `18.2959 ms`, `0.04x`; this path is architecture-correct for
-  MPK-style task execution but not performance-ready until the task bodies are
-  replaced with tiled tensor-core worker tasks.
+  prototype, before cooperative worker tiling: `18.2959 ms`, `0.04x`.
+- Qwen3.6-35B-A3B official MoE synthetic, cooperative persistent MoE:
+  batch 1 `1.5922 ms`, `0.51x`; batch 2 `1.9240 ms`, `0.75x`;
+  batch 4 `2.2278 ms`, `1.18x`; batch 8 `2.7972 ms`, `1.82x`.
+  This is still scalar-FMA tile work rather than native tensor-core WMMA, but
+  the MPK-style single launch now distributes router, routed expert, shared
+  expert, and down-projection work across cooperative CTA workers.
 - Qwen3.6-27B official dense FFN synthetic, batch 1, default torch backend:
   `0.2708 ms`, `5.37x`; with CUDA Graph replay: `0.2133 ms`, `6.84x`.
 - Qwen3.6-27B official dense FFN synthetic, batch 1, old scalar CUDA backend:
