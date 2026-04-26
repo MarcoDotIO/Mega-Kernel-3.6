@@ -138,6 +138,15 @@ def test_moe_reference_shapes_and_topk():
     torch.testing.assert_close(router_weights.sum(dim=-1), torch.ones(x.shape[0]))
 
 
+def test_moe_grouped_backend_matches_reference_cpu():
+    x, weights, top_k = _small_moe()
+    out, idx, router_weights = mk.moe_decode(x, weights, top_k=top_k, backend="grouped")
+    ref, ref_idx, ref_router_weights = mk.moe_decode(x, weights, top_k=top_k, backend="reference")
+    assert idx.tolist() == ref_idx.tolist()
+    torch.testing.assert_close(router_weights, ref_router_weights)
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
+
+
 def test_dense_ffn_reference_shapes():
     x, weights = _small_dense()
     out = dense_ffn_decode_reference(
@@ -148,6 +157,13 @@ def test_dense_ffn_reference_shapes():
         weights.down_weight,
     )
     assert out.shape == x.shape
+
+
+def test_dense_ffn_torch_backend_matches_reference_cpu():
+    x, weights = _small_dense()
+    out = mk.dense_ffn_decode(x, weights, backend="torch")
+    ref = mk.dense_ffn_decode(x, weights, backend="reference")
+    torch.testing.assert_close(out, ref, atol=1e-5, rtol=1e-4)
 
 
 def test_attention_reference_shapes():

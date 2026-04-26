@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--scale", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=321)
+    parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--iters", type=int, default=50)
     args = parser.parse_args()
 
@@ -32,7 +33,12 @@ def main():
     k = (torch.randn(args.batch, args.seq_len, args.kv_heads, args.head_dim, device="cuda") * args.scale).to(dtype)
     v = (torch.randn(args.batch, args.seq_len, args.kv_heads, args.head_dim, device="cuda") * args.scale).to(dtype)
     inputs = mk.FullAttentionInputs(q=q, k_cache=k, v_cache=v)
-    ext_result = cuda_time(lambda: mk.full_attention_decode(inputs), iters=args.iters, tokens=args.batch)
+    ext_result = cuda_time(
+        lambda: mk.full_attention_decode(inputs),
+        iters=args.iters,
+        tokens=args.batch,
+        cuda_graph=args.cuda_graph,
+    )
     ref_result = cuda_time(
         lambda: full_attention_decode_reference(q, k, v),
         warmup=max(2, args.iters // 10),
@@ -40,8 +46,9 @@ def main():
         tokens=args.batch,
     )
     print(f"extension_available={mk.extension_available()}")
-    print(f"extension_median_ms={ext_result.median_ms:.4f}")
-    print(f"extension_p95_ms={ext_result.p95_ms:.4f}")
+    print(f"cuda_graph={args.cuda_graph}")
+    print(f"optimized_median_ms={ext_result.median_ms:.4f}")
+    print(f"optimized_p95_ms={ext_result.p95_ms:.4f}")
     print(f"reference_median_ms={ref_result.median_ms:.4f}")
     print(f"speedup={ref_result.median_ms / ext_result.median_ms:.2f}x")
     print(f"tokens_per_sec={ext_result.tokens_per_sec:.2f}")

@@ -14,18 +14,35 @@ class BenchResult:
     max_memory_mb: float
 
 
-def cuda_time(fn, *, warmup: int = 10, iters: int = 50, tokens: int = 1) -> BenchResult:
+def cuda_time(
+    fn,
+    *,
+    warmup: int = 10,
+    iters: int = 50,
+    tokens: int = 1,
+    cuda_graph: bool = False,
+) -> BenchResult:
     torch.cuda.reset_peak_memory_stats()
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
+
+    if cuda_graph:
+        graph = torch.cuda.CUDAGraph()
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            fn()
+        torch.cuda.synchronize()
+        timed_fn = graph.replay
+    else:
+        timed_fn = fn
 
     times = []
     for _ in range(iters):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
-        fn()
+        timed_fn()
         end.record()
         torch.cuda.synchronize()
         times.append(start.elapsed_time(end))

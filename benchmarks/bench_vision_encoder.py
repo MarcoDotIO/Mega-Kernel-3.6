@@ -128,7 +128,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--official", action="store_true")
     parser.add_argument("--mode", choices=["attention", "block", "encoder"], default="block")
-    parser.add_argument("--backend", choices=["auto", "sdpa", "triton"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "sdpa", "flash", "triton"], default="auto")
     parser.add_argument("--layers", type=int, default=1)
     parser.add_argument("--height", type=int, default=32)
     parser.add_argument("--width", type=int, default=32)

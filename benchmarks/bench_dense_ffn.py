@@ -39,13 +39,19 @@ def main():
     parser.add_argument("--scale", type=float, default=0.02)
     parser.add_argument("--seed", type=int, default=456)
     parser.add_argument("--official", action="store_true")
-    parser.add_argument("--backend", choices=["auto", "cuda", "triton", "reference"], default="auto")
+    parser.add_argument("--backend", choices=["auto", "torch", "cuda", "triton", "reference"], default="auto")
+    parser.add_argument("--cuda-graph", action="store_true")
     parser.add_argument("--iters", type=int, default=50)
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA is required"
     x, weights = make_inputs(args)
-    ext_result = cuda_time(lambda: mk.dense_ffn_decode(x, weights, backend=args.backend), iters=args.iters, tokens=args.batch)
+    ext_result = cuda_time(
+        lambda: mk.dense_ffn_decode(x, weights, backend=args.backend),
+        iters=args.iters,
+        tokens=args.batch,
+        cuda_graph=args.cuda_graph,
+    )
     ref_result = cuda_time(
         lambda: dense_ffn_decode_reference(
             x,
@@ -60,8 +66,9 @@ def main():
     )
     print(f"extension_available={mk.extension_available()}")
     print(f"backend={args.backend}")
-    print(f"extension_median_ms={ext_result.median_ms:.4f}")
-    print(f"extension_p95_ms={ext_result.p95_ms:.4f}")
+    print(f"cuda_graph={args.cuda_graph}")
+    print(f"optimized_median_ms={ext_result.median_ms:.4f}")
+    print(f"optimized_p95_ms={ext_result.p95_ms:.4f}")
     print(f"reference_median_ms={ref_result.median_ms:.4f}")
     print(f"speedup={ref_result.median_ms / ext_result.median_ms:.2f}x")
     print(f"tokens_per_sec={ext_result.tokens_per_sec:.2f}")

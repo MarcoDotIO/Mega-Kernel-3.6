@@ -244,6 +244,12 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_decode_cuda(
     TORCH_CHECK(shared_down.dim() == 2, "shared_down must be [hidden, shared_intermediate]");
     TORCH_CHECK(x.scalar_type() == norm_weight.scalar_type(), "x and norm_weight dtype mismatch");
     TORCH_CHECK(x.scalar_type() == router_weight.scalar_type(), "x and router_weight dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == expert_gate.scalar_type(), "x and expert_gate dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == expert_up.scalar_type(), "x and expert_up dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == expert_down.scalar_type(), "x and expert_down dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == shared_gate.scalar_type(), "x and shared_gate dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == shared_up.scalar_type(), "x and shared_up dtype mismatch");
+    TORCH_CHECK(x.scalar_type() == shared_down.scalar_type(), "x and shared_down dtype mismatch");
 
     int batch = static_cast<int>(x.size(0));
     int hidden = static_cast<int>(x.size(1));

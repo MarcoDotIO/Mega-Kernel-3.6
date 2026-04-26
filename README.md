@@ -9,8 +9,12 @@ The implementation targets single-GPU Qwen3.6 decode on H100 and RTX PRO 6000
 Blackwell-class GPUs and exposes:
 
 - `dense_ffn_decode`: RMSNorm, dense SwiGLU FFN, and residual for
-  `Qwen/Qwen3.6-27B`.
+  `Qwen/Qwen3.6-27B`. The default CUDA path uses tensor-core-friendly PyTorch
+  matmuls; the original scalar CUDA prototype remains available with
+  `backend="cuda"`.
 - `moe_decode`: RMSNorm, router top-k, routed MoE, shared expert, and FFN residual.
+  The default CUDA path uses a grouped/batched tensor-core prototype; the
+  original scalar CUDA extension remains available with `backend="cuda"`.
 - `full_attention_decode`: one-token GQA attention over an existing KV cache.
 - `linear_attention_decode`: FP32 recurrent-state linear attention primitive.
 - `decode_layer`: small Python dispatcher for the Qwen3.6 layer pattern.
@@ -63,8 +67,11 @@ kernel iteration. Pass `--official` for official Qwen3.6 dimensions.
 
 ```bash
 python benchmarks/bench_moe.py
+python benchmarks/bench_moe.py --official --backend auto --cuda-graph
 python benchmarks/bench_dense_ffn.py
+python benchmarks/bench_dense_ffn.py --official --backend auto --cuda-graph
 python benchmarks/bench_attention.py --seq-len 32768
+python benchmarks/bench_attention.py --seq-len 32768 --cuda-graph
 python benchmarks/bench_vision_encoder.py --mode block
 python benchmarks/bench_vision_encoder.py --official --height 32 --width 32 --mode block
 ```
@@ -87,6 +94,7 @@ export TORCH_CUDA_ARCH_LIST="9.0;12.0"
 python -m pip install -e . --no-build-isolation
 python setup.py build_ext --inplace
 pytest tests/test_runtime_parity.py --run-runtime-parity
+pytest tests/test_transformers_parity.py --run-transformers-parity
 ```
 
 These tests compare shared numerical primitives against vLLM/SGLang when their
@@ -98,6 +106,10 @@ In the current viper parity environment, `sgl-kernel 0.3.21` installs but its
 native `common_ops` library fails to load against the selected Torch ABI, so
 SGLang native FlashAttention parity is skipped while SGLang Python/JIT RMSNorm
 parity remains testable.
+The Transformers parity tests instantiate the official Qwen3.6-27B vision
+architecture, copy live Hugging Face module weights into the local dataclasses,
+and compare block/model forward outputs without downloading the full 27B
+checkpoint.
 
 ## Verified H100 Baseline
 
@@ -115,19 +127,28 @@ PyTorch 2.7.0, BF16 inputs, and `TORCH_CUDA_ARCH_LIST="9.0;12.0"`.
 ## Verified Qwen3.6-27B / Runtime Parity Update
 
 Measured on the same H100 after adding `Qwen/Qwen3.6-27B`, `sm_120`, Triton
-RMSNorm/LayerNorm, vision encoder primitives, and runtime parity hooks.
+RMSNorm/LayerNorm, grouped decode backends, vision encoder primitives, CUDA
+Graph benchmark replay, and runtime parity hooks.
 
-- Core tests: `31 passed, 4 skipped`.
+- Core tests: `50 passed, 6 skipped`.
+- Transformers architecture parity: `2 passed`.
 - Runtime parity tests with `vllm 0.19.1` and `sglang 0.5.10.post1`:
   `3 passed, 1 skipped`.
 - Passed parity: vLLM RMSNorm, SGLang RMSNorm, and vLLM Triton decode attention.
 - Skipped parity: SGLang FlashAttention, because `flash_attn.cute` is not
   available in the installed runtime stack.
-- Qwen3.6-27B official dense FFN synthetic, batch 1: `2.9157 ms`, `0.50x`;
-  this CUDA path is correctness-first and still needs tensor-core matmul tiling.
-- Full attention decode, 32K context: `0.7420 ms`, `2.53x`.
-- Qwen3.6-27B official vision attention, 32x32 grid: `0.2156 ms`, `3.72x`.
-- Qwen3.6-27B official vision block, 32x32 grid: `0.3052 ms`, `5.42x`.
+- Qwen3.6-35B-A3B official MoE synthetic, batch 1, default grouped backend:
+  `0.3546 ms`, `2.31x`; with CUDA Graph replay: `0.2511 ms`, `3.16x`.
+- Qwen3.6-35B-A3B official MoE synthetic, batch 1, old scalar CUDA backend:
+  `1.2491 ms`, `0.64x`.
+- Qwen3.6-27B official dense FFN synthetic, batch 1, default torch backend:
+  `0.2708 ms`, `5.37x`; with CUDA Graph replay: `0.2133 ms`, `6.84x`.
+- Qwen3.6-27B official dense FFN synthetic, batch 1, old scalar CUDA backend:
+  `2.8912 ms`, `0.51x`.
+- Full attention decode, 32K context: `0.7405 ms`, `2.53x`; with CUDA Graph
+  replay: `0.7356 ms`, `2.53x`.
+- Qwen3.6-27B official vision attention, 32x32 grid: `0.2094 ms`, `3.81x`.
+- Qwen3.6-27B official vision block, 32x32 grid: `0.2948 ms`, `5.60x`.
 - Qwen3.6-27B official 27-layer vision encoder wrapper, 32x32 grid:
   `9.0645 ms`, `5.12x`.
 - Triton LayerNorm vision block path is numerically correct but measured slower

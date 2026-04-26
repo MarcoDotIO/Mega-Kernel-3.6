@@ -15,6 +15,7 @@ from .reference import (
     layer_norm_reference,
     linear_attention_decode_reference,
     moe_decode_reference,
+    rms_norm,
     vision_attention_encode_reference,
     vision_encoder_block_reference,
     vision_fast_pos_embed_interpolate_reference,
@@ -29,6 +30,9 @@ try:
     from . import _C
 except Exception:  # pragma: no cover - exercised when extension is not built.
     _C = None
+
+_FLASH_ATTN_VARLEN = None
+_FLASH_ATTN_IMPORT_ATTEMPTED = False
 
 
 @dataclass(frozen=True)
@@ -146,6 +150,130 @@ def _use_extension(*tensors: torch.Tensor) -> bool:
     return _C is not None and all(t.is_cuda for t in tensors)
 
 
+def _use_low_precision_matmul(x: torch.Tensor) -> bool:
+    return x.is_cuda and x.dtype in {torch.float16, torch.bfloat16}
+
+
+def _matmul_input_dtype(x: torch.Tensor) -> torch.dtype:
+    return x.dtype if _use_low_precision_matmul(x) else torch.float32
+
+
+def _moe_decode_grouped_torch(
+    x: torch.Tensor,
+    weights: MoeWeights,
+    *,
+    eps: float,
+    top_k: int,
+    add_residual: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    x_norm_f = rms_norm(x, weights.norm_weight, eps).float()
+    logits = x_norm_f @ weights.router_weight.float().t()
+    topk_logits, topk_indices = torch.topk(logits, k=top_k, dim=-1)
+    topk_weights = torch.softmax(topk_logits, dim=-1)
+
+    batch, hidden = x.shape
+    intermediate = weights.expert_gate.shape[1]
+    flat_indices = topk_indices.reshape(-1)
+    matmul_dtype = _matmul_input_dtype(x)
+    x_mm = x_norm_f.to(matmul_dtype)
+    x_selected = x_mm[:, None, :].expand(batch, top_k, hidden).reshape(batch * top_k, hidden).contiguous()
+
+    gate_w = weights.expert_gate.index_select(0, flat_indices).reshape(batch * top_k, intermediate, hidden)
+    up_w = weights.expert_up.index_select(0, flat_indices).reshape(batch * top_k, intermediate, hidden)
+    gate = torch.bmm(gate_w, x_selected.unsqueeze(-1)).squeeze(-1).float()
+    up = torch.bmm(up_w, x_selected.unsqueeze(-1)).squeeze(-1).float()
+    routed_act = F.silu(gate) * up * topk_weights.reshape(batch * top_k, 1)
+
+    down_w = weights.expert_down.index_select(0, flat_indices).reshape(batch * top_k, hidden, intermediate)
+    routed = torch.bmm(down_w, routed_act.to(matmul_dtype).unsqueeze(-1)).squeeze(-1).float()
+    routed = routed.view(batch, top_k, hidden).sum(dim=1)
+
+    shared_gate = F.linear(x_mm, weights.shared_gate).float()
+    shared_up = F.linear(x_mm, weights.shared_up).float()
+    shared_act = F.silu(shared_gate) * shared_up
+    shared = F.linear(shared_act.to(matmul_dtype), weights.shared_down).float()
+
+    out = routed + shared
+    if add_residual:
+        out = out + x.float()
+    return out.to(x.dtype), topk_indices, topk_weights
+
+
+def _dense_ffn_decode_torch(
+    x: torch.Tensor,
+    weights: DenseFfnWeights,
+    *,
+    eps: float,
+    add_residual: bool,
+) -> torch.Tensor:
+    x_norm = rms_norm(x, weights.norm_weight, eps)
+    matmul_dtype = _matmul_input_dtype(x)
+    x_mm = x_norm.to(matmul_dtype)
+    gate = F.linear(x_mm, weights.gate_weight).float()
+    up = F.linear(x_mm, weights.up_weight).float()
+    act = F.silu(gate) * up
+    out = F.linear(act.to(matmul_dtype), weights.down_weight).float()
+    if add_residual:
+        out = out + x.float()
+    return out.to(x.dtype)
+
+
+def _flash_attn_varlen(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    scale: Optional[float],
+) -> Optional[torch.Tensor]:
+    global _FLASH_ATTN_IMPORT_ATTEMPTED, _FLASH_ATTN_VARLEN
+    if not query.is_cuda:
+        return None
+    if not _FLASH_ATTN_IMPORT_ATTEMPTED:
+        try:
+            from flash_attn import flash_attn_varlen_func
+        except Exception:
+            _FLASH_ATTN_VARLEN = None
+        else:
+            _FLASH_ATTN_VARLEN = flash_attn_varlen_func
+        _FLASH_ATTN_IMPORT_ATTEMPTED = True
+    if _FLASH_ATTN_VARLEN is None:
+        return None
+
+    cu = cu_seqlens.to(device=query.device, dtype=torch.int32).contiguous()
+    max_seqlen = int((cu[1:] - cu[:-1]).max().item())
+    kwargs = {
+        "dropout_p": 0.0,
+        "softmax_scale": scale,
+        "causal": False,
+    }
+    try:
+        return _FLASH_ATTN_VARLEN(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            cu,
+            cu,
+            max_seqlen,
+            max_seqlen,
+            **kwargs,
+        )
+    except TypeError:
+        return _FLASH_ATTN_VARLEN(
+            query.contiguous(),
+            key.contiguous(),
+            value.contiguous(),
+            cu,
+            cu,
+            max_seqlen,
+            max_seqlen,
+            0.0,
+            scale,
+            False,
+        )
+    except Exception:
+        return None
+
+
 def moe_decode(
     x: torch.Tensor,
     weights: MoeWeights,
@@ -153,7 +281,10 @@ def moe_decode(
     eps: float = 1e-6,
     top_k: int = 8,
     add_residual: bool = True,
+    backend: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if backend not in {"auto", "cuda", "grouped", "reference"}:
+        raise ValueError("backend must be one of: auto, cuda, grouped, reference")
     tensors = (
         x,
         weights.norm_weight,
@@ -165,8 +296,14 @@ def moe_decode(
         weights.shared_up,
         weights.shared_down,
     )
-    if _use_extension(*tensors):
+    if backend in {"auto", "grouped"} and all(t.is_cuda for t in tensors):
+        return _moe_decode_grouped_torch(x, weights, eps=eps, top_k=top_k, add_residual=add_residual)
+    if backend == "grouped":
+        return _moe_decode_grouped_torch(x, weights, eps=eps, top_k=top_k, add_residual=add_residual)
+    if backend in {"auto", "cuda"} and _use_extension(*tensors):
         return _C.moe_decode(*tensors, float(eps), int(top_k), bool(add_residual))
+    if backend == "cuda":
+        raise RuntimeError("CUDA extension is unavailable for moe_decode")
     return moe_decode_reference(
         x,
         weights.norm_weight,
@@ -198,9 +335,13 @@ def dense_ffn_decode(
         weights.up_weight,
         weights.down_weight,
     )
-    if backend not in {"auto", "cuda", "triton", "reference"}:
-        raise ValueError("backend must be one of: auto, cuda, triton, reference")
-    if backend in {"auto", "cuda"} and _use_extension(*tensors):
+    if backend not in {"auto", "cuda", "torch", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, cuda, torch, triton, reference")
+    if backend == "auto" and all(t.is_cuda for t in tensors):
+        return _dense_ffn_decode_torch(x, weights, eps=eps, add_residual=add_residual)
+    if backend == "torch":
+        return _dense_ffn_decode_torch(x, weights, eps=eps, add_residual=add_residual)
+    if backend == "cuda" and _use_extension(*tensors):
         return _C.dense_ffn_decode(*tensors, float(eps), bool(add_residual))
     if backend == "cuda":
         raise RuntimeError("CUDA extension is unavailable for dense_ffn_decode")
@@ -302,8 +443,8 @@ def vision_attention_encode(
     scale: Optional[float] = None,
     backend: str = "auto",
 ) -> torch.Tensor:
-    if backend not in {"auto", "sdpa", "triton", "reference"}:
-        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    if backend not in {"auto", "sdpa", "flash", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, flash, triton, reference")
     if backend == "reference":
         return vision_attention_encode_reference(
             hidden_states,
@@ -325,7 +466,26 @@ def vision_attention_encode(
     query, key, value = qkv.unbind(0)
     query, key = _apply_rotary_pos_emb_vision(query, key, cos, sin)
 
+    if backend in {"auto", "flash"}:
+        flash_out = _flash_attn_varlen(query, key, value, cu_seqlens, scale)
+        if flash_out is not None:
+            attn = flash_out.reshape(seq_length, hidden_size)
+            return F.linear(attn, weights.proj_weight, weights.proj_bias)
+        if backend == "flash":
+            raise RuntimeError("flash_attn_varlen_func is unavailable for vision_attention_encode")
+
     cu = cu_seqlens.detach().cpu().tolist()
+    if len(cu) == 2:
+        q = query.transpose(0, 1).unsqueeze(0)
+        k = key.transpose(0, 1).unsqueeze(0)
+        v = value.transpose(0, 1).unsqueeze(0)
+        if scale is None:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False, scale=scale)
+        attn = out.squeeze(0).transpose(0, 1).reshape(seq_length, hidden_size)
+        return F.linear(attn, weights.proj_weight, weights.proj_bias)
+
     outputs = []
     for start, end in zip(cu[:-1], cu[1:]):
         q = query[start:end].transpose(0, 1).unsqueeze(0)
@@ -432,8 +592,8 @@ def vision_encoder_block(
     eps: float = 1e-6,
     backend: str = "auto",
 ) -> torch.Tensor:
-    if backend not in {"auto", "sdpa", "triton", "reference"}:
-        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    if backend not in {"auto", "sdpa", "flash", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, flash, triton, reference")
     if backend == "reference":
         return vision_encoder_block_reference(
             hidden_states,
@@ -458,6 +618,7 @@ def vision_encoder_block(
         )
 
     norm_backend = "triton" if backend == "triton" and hidden_states.is_cuda else "auto"
+    attention_backend = "flash" if backend == "flash" else ("sdpa" if backend == "sdpa" else "auto")
     normed = _layer_norm(hidden_states, weights.norm1_weight, weights.norm1_bias, eps=eps, backend=norm_backend)
     hidden_states = hidden_states + vision_attention_encode(
         normed,
@@ -466,7 +627,7 @@ def vision_encoder_block(
         cos,
         sin,
         num_heads=num_heads,
-        backend="sdpa",
+        backend=attention_backend,
     )
     normed = _layer_norm(hidden_states, weights.norm2_weight, weights.norm2_bias, eps=eps, backend=norm_backend)
     hidden_states = hidden_states + vision_mlp_encode(normed, weights.mlp, hidden_act=hidden_act)
@@ -482,8 +643,8 @@ def vision_encode(
     eps: float = 1e-6,
     backend: str = "auto",
 ) -> VisionEncoderResult:
-    if backend not in {"auto", "sdpa", "triton", "reference"}:
-        raise ValueError("backend must be one of: auto, sdpa, triton, reference")
+    if backend not in {"auto", "sdpa", "flash", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, sdpa, flash, triton, reference")
     cfg = config or qwen36_27b_vision_config()
     grid_thw = grid_thw.to(device=pixel_values.device)
 
