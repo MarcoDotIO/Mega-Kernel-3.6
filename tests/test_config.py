@@ -23,3 +23,19 @@ def test_qwen36_35b_a3b_config_values():
         "linear_attention",
         "full_attention",
     )
+
+
+def test_qwen36_27b_config_values():
+    cfg = mk.qwen36_27b_config()
+    assert cfg.model_name == "Qwen/Qwen3.6-27B"
+    assert not cfg.is_moe
+    assert cfg.hidden_size == 5120
+    assert cfg.num_hidden_layers == 64
+    assert cfg.intermediate_size == 17408
+    assert cfg.num_attention_heads == 24
+    assert cfg.num_key_value_heads == 4
+    assert cfg.head_dim == 256
+    assert cfg.rotary_dim == 64
+    assert cfg.linear_num_value_heads == 48
+    assert cfg.layer_types[3] == "full_attention"
+    assert cfg.layer_types[4] == "linear_attention"

@@ -2,7 +2,7 @@ import pytest
 import torch
 
 import mega_kernel_qwen36 as mk
-from tests.test_reference import _small_moe
+from tests.test_reference import _small_dense, _small_moe
 
 
 pytestmark = pytest.mark.skipif(
@@ -32,6 +32,29 @@ def test_moe_decode_cuda_matches_reference(batch):
     )
     assert idx.cpu().tolist() == ref_idx.tolist()
     _assert_close_bf16(router_weights.cpu(), ref_router_weights)
+    _assert_close_bf16(out.cpu(), ref)
+
+
+@pytest.mark.parametrize("batch", [1, 2, 4, 8])
+def test_dense_ffn_decode_cuda_matches_reference(batch):
+    x, weights = _small_dense(device="cuda", dtype=torch.bfloat16)
+    x = x[:1].repeat(batch, 1).contiguous()
+    out = mk.dense_ffn_decode(x, weights)
+    ref = mk.dense_ffn_decode(
+        x.cpu().float(),
+        mk.DenseFfnWeights(*(t.cpu().float() for t in weights.__dict__.values())),
+    )
+    _assert_close_bf16(out.cpu(), ref)
+
+
+def test_dense_ffn_decode_triton_matches_reference():
+    pytest.importorskip("triton")
+    x, weights = _small_dense(device="cuda", dtype=torch.bfloat16)
+    out = mk.dense_ffn_decode(x, weights, backend="triton")
+    ref = mk.dense_ffn_decode(
+        x.cpu().float(),
+        mk.DenseFfnWeights(*(t.cpu().float() for t in weights.__dict__.values())),
+    )
     _assert_close_bf16(out.cpu(), ref)
 
 

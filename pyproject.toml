@@ -5,11 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mega-kernel-qwen36"
 version = "0.1.0"
-description = "Decode-path CUDA kernels and references for Qwen3.6-35B-A3B"
+description = "Decode-path CUDA/Triton kernels and references for Qwen3.6"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch>=2.7",
+    "triton>=3.3; platform_system == 'Linux'",
 ]
 
 [project.optional-dependencies]
@@ -20,6 +21,11 @@ dev = [
     "transformers>=4.57.1",
     "huggingface_hub>=0.30",
     "safetensors>=0.5",
+]
+
+parity = [
+    "vllm==0.19.1",
+    "sglang==0.5.10.post1",
 ]
 
 [tool.setuptools.packages.find]

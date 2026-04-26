@@ -9,6 +9,7 @@ import torch
 from .config import qwen36_layer_type
 from .reference import (
     apply_partial_rope,
+    dense_ffn_decode_reference,
     full_attention_decode_reference,
     linear_attention_decode_reference,
     moe_decode_reference,
@@ -30,6 +31,14 @@ class MoeWeights:
     shared_gate: torch.Tensor
     shared_up: torch.Tensor
     shared_down: torch.Tensor
+
+
+@dataclass(frozen=True)
+class DenseFfnWeights:
+    norm_weight: torch.Tensor
+    gate_weight: torch.Tensor
+    up_weight: torch.Tensor
+    down_weight: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -55,8 +64,8 @@ class LinearAttentionInputs:
 @dataclass(frozen=True)
 class DecodeLayerResult:
     hidden: torch.Tensor
-    router_indices: torch.Tensor
-    router_weights: torch.Tensor
+    router_indices: Optional[torch.Tensor] = None
+    router_weights: Optional[torch.Tensor] = None
     attention_output: Optional[torch.Tensor] = None
     linear_output: Optional[torch.Tensor] = None
     linear_state: Optional[torch.Tensor] = None
@@ -107,6 +116,50 @@ def moe_decode(
     )
 
 
+def dense_ffn_decode(
+    x: torch.Tensor,
+    weights: DenseFfnWeights,
+    *,
+    eps: float = 1e-6,
+    add_residual: bool = True,
+    backend: str = "auto",
+) -> torch.Tensor:
+    tensors = (
+        x,
+        weights.norm_weight,
+        weights.gate_weight,
+        weights.up_weight,
+        weights.down_weight,
+    )
+    if backend not in {"auto", "cuda", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, cuda, triton, reference")
+    if backend in {"auto", "cuda"} and _use_extension(*tensors):
+        return _C.dense_ffn_decode(*tensors, float(eps), bool(add_residual))
+    if backend == "cuda":
+        raise RuntimeError("CUDA extension is unavailable for dense_ffn_decode")
+    if backend == "triton":
+        from .triton_ops import dense_ffn_decode_triton
+
+        return dense_ffn_decode_triton(
+            x,
+            weights.norm_weight,
+            weights.gate_weight,
+            weights.up_weight,
+            weights.down_weight,
+            eps=eps,
+            add_residual=add_residual,
+        )
+    return dense_ffn_decode_reference(
+        x,
+        weights.norm_weight,
+        weights.gate_weight,
+        weights.up_weight,
+        weights.down_weight,
+        eps=eps,
+        add_residual=add_residual,
+    )
+
+
 def full_attention_decode(inputs: FullAttentionInputs) -> torch.Tensor:
     q, k_cache = apply_partial_rope(inputs.q, inputs.k_cache, inputs.cos, inputs.sin, inputs.rotary_dim)
     scale = inputs.scale
@@ -132,8 +185,9 @@ def linear_attention_decode(inputs: LinearAttentionInputs) -> tuple[torch.Tensor
 def decode_layer(
     layer_idx: int,
     hidden: torch.Tensor,
-    moe: MoeWeights,
+    moe: Optional[MoeWeights] = None,
     *,
+    dense_ffn: Optional[DenseFfnWeights] = None,
     full_attention: Optional[FullAttentionInputs] = None,
     linear_attention: Optional[LinearAttentionInputs] = None,
     layer_type: Optional[str] = None,
@@ -160,7 +214,14 @@ def decode_layer(
     else:
         raise ValueError(f"unsupported layer_type: {kind}")
 
-    out, router_indices, router_weights = moe_decode(residual, moe, eps=eps, top_k=top_k, add_residual=True)
+    if dense_ffn is not None:
+        out = dense_ffn_decode(residual, dense_ffn, eps=eps, add_residual=True)
+        router_indices = None
+        router_weights = None
+    else:
+        if moe is None:
+            raise ValueError("either moe or dense_ffn weights are required")
+        out, router_indices, router_weights = moe_decode(residual, moe, eps=eps, top_k=top_k, add_residual=True)
     return DecodeLayerResult(
         hidden=out,
         router_indices=router_indices,

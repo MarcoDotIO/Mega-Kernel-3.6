@@ -2,6 +2,7 @@ import torch
 
 import mega_kernel_qwen36 as mk
 from mega_kernel_qwen36.reference import (
+    dense_ffn_decode_reference,
     full_attention_decode_reference,
     linear_attention_decode_reference,
     moe_decode_reference,
@@ -26,6 +27,20 @@ def _small_moe(device="cpu", dtype=torch.float32):
     return x, weights, top_k
 
 
+def _small_dense(device="cpu", dtype=torch.float32):
+    torch.manual_seed(23)
+    batch, hidden, intermediate = 2, 16, 24
+    scale = 0.08
+    x = (torch.randn(batch, hidden, device=device) * scale).to(dtype)
+    weights = mk.DenseFfnWeights(
+        norm_weight=(torch.randn(hidden, device=device) * scale + 1.0).to(dtype),
+        gate_weight=(torch.randn(intermediate, hidden, device=device) * scale).to(dtype),
+        up_weight=(torch.randn(intermediate, hidden, device=device) * scale).to(dtype),
+        down_weight=(torch.randn(hidden, intermediate, device=device) * scale).to(dtype),
+    )
+    return x, weights
+
+
 def test_moe_reference_shapes_and_topk():
     x, weights, top_k = _small_moe()
     out, idx, router_weights = moe_decode_reference(
@@ -44,6 +59,18 @@ def test_moe_reference_shapes_and_topk():
     assert idx.shape == (x.shape[0], top_k)
     assert router_weights.shape == (x.shape[0], top_k)
     torch.testing.assert_close(router_weights.sum(dim=-1), torch.ones(x.shape[0]))
+
+
+def test_dense_ffn_reference_shapes():
+    x, weights = _small_dense()
+    out = dense_ffn_decode_reference(
+        x,
+        weights.norm_weight,
+        weights.gate_weight,
+        weights.up_weight,
+        weights.down_weight,
+    )
+    assert out.shape == x.shape
 
 
 def test_attention_reference_shapes():
@@ -81,3 +108,19 @@ def test_decode_layer_dispatch_reference_linear():
     )
     assert result.hidden.shape == x.shape
     assert result.linear_state is not None
+
+
+def test_decode_layer_dispatch_reference_dense():
+    x, weights = _small_dense()
+    q = torch.randn(2, 4, 4)
+    k = torch.randn(2, 4, 4)
+    v = torch.randn(2, 4, 4)
+    state = torch.zeros(2, 4, 4, 4)
+    result = mk.decode_layer(
+        0,
+        x,
+        dense_ffn=weights,
+        linear_attention=mk.LinearAttentionInputs(q=q, k=k, v=v, state=state),
+    )
+    assert result.hidden.shape == x.shape
+    assert result.router_indices is None

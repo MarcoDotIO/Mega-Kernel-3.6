@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 import urllib.request
+import argparse
 
 
-URL = "https://huggingface.co/Qwen/Qwen3.6-35B-A3B/raw/main/config.json"
+DEFAULT_MODEL = "Qwen/Qwen3.6-27B"
 
 
 def main() -> None:
-    with urllib.request.urlopen(URL, timeout=30) as response:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    args = parser.parse_args()
+    url = f"https://huggingface.co/{args.model}/raw/main/config.json"
+    with urllib.request.urlopen(url, timeout=30) as response:
         config = json.load(response)
     text = config["text_config"]
     summary = {
+        "model": args.model,
         "model_type": text["model_type"],
         "hidden_size": text["hidden_size"],
         "num_hidden_layers": text["num_hidden_layers"],
@@ -19,9 +25,10 @@ def main() -> None:
         "num_attention_heads": text["num_attention_heads"],
         "num_key_value_heads": text["num_key_value_heads"],
         "head_dim": text["head_dim"],
-        "num_experts": text["num_experts"],
-        "num_experts_per_tok": text["num_experts_per_tok"],
-        "moe_intermediate_size": text["moe_intermediate_size"],
+        "intermediate_size": text.get("intermediate_size"),
+        "num_experts": text.get("num_experts"),
+        "num_experts_per_tok": text.get("num_experts_per_tok"),
+        "moe_intermediate_size": text.get("moe_intermediate_size"),
         "max_position_embeddings": text["max_position_embeddings"],
     }
     print(json.dumps(summary, indent=2, sort_keys=True))

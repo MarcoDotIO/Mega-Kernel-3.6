@@ -62,6 +62,32 @@ def moe_decode_reference(
     return out.to(x.dtype), topk_indices, topk_weights
 
 
+def dense_ffn_decode_reference(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gate_weight: torch.Tensor,
+    up_weight: torch.Tensor,
+    down_weight: torch.Tensor,
+    *,
+    eps: float = 1e-6,
+    add_residual: bool = True,
+) -> torch.Tensor:
+    """Reference dense SwiGLU decode FFN for Qwen/Qwen3.6-27B.
+
+    Shapes:
+    - x: [batch, hidden]
+    - gate_weight/up_weight: [intermediate, hidden]
+    - down_weight: [hidden, intermediate]
+    """
+
+    x_norm = rms_norm(x, norm_weight, eps).float()
+    act = F.silu(x_norm @ gate_weight.float().t()) * (x_norm @ up_weight.float().t())
+    out = act @ down_weight.float().t()
+    if add_residual:
+        out += x.float()
+    return out.to(x.dtype)
+
+
 def apply_partial_rope(
     q: torch.Tensor,
     k: torch.Tensor,

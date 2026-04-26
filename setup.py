@@ -12,7 +12,7 @@ else:
 
 
 if not os.environ.get("TORCH_CUDA_ARCH_LIST"):
-    os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0"
+    os.environ["TORCH_CUDA_ARCH_LIST"] = "9.0;12.0"
 
 
 setup(
@@ -25,6 +25,7 @@ setup(
             sources=[
                 "csrc/bindings.cpp",
                 "csrc/moe_decode.cu",
+                "csrc/dense_ffn_decode.cu",
                 "csrc/attention_decode.cu",
                 "csrc/linear_attention_decode.cu",
             ],

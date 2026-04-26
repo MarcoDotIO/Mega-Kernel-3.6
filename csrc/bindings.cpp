@@ -16,6 +16,15 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> moe_decode_cuda(
     int64_t top_k,
     bool add_residual);
 
+torch::Tensor dense_ffn_decode_cuda(
+    torch::Tensor x,
+    torch::Tensor norm_weight,
+    torch::Tensor gate_weight,
+    torch::Tensor up_weight,
+    torch::Tensor down_weight,
+    double eps,
+    bool add_residual);
+
 torch::Tensor full_attention_decode_cuda(
     torch::Tensor q,
     torch::Tensor k_cache,
@@ -31,6 +40,7 @@ std::tuple<torch::Tensor, torch::Tensor> linear_attention_decode_cuda(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("moe_decode", &moe_decode_cuda, "Qwen3.6 MoE decode kernel");
+    m.def("dense_ffn_decode", &dense_ffn_decode_cuda, "Qwen3.6 dense FFN decode kernel");
     m.def("full_attention_decode", &full_attention_decode_cuda, "Qwen3.6 full-attention decode kernel");
     m.def("linear_attention_decode", &linear_attention_decode_cuda, "Qwen3.6 linear-attention recurrent decode kernel");
 }
