@@ -55,10 +55,3 @@ def test_vision_tgraph_and_json_export():
     assert data["name"].endswith("vision:tokens1024")
     assert any(task["kind"] == "vision_patch_embed" for task in data["tasks"])
     assert any(task["kind"] == "vision_patch_merger" for task in data["tasks"])
-
-
-def test_mirage_skeleton_mentions_persistent_kernel():
-    graph = mk.build_qwen36_decode_tgraph(mk.qwen36_27b_config(), batch_size=1, num_layers=1)
-    skeleton = mk.emit_mirage_skeleton(graph.linearize())
-    assert "mi.PersistentKernel" in skeleton
-    assert "mpk.compile()" in skeleton

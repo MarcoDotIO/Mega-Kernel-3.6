@@ -18,7 +18,6 @@ def main() -> None:
     parser.add_argument("--tokens", type=int, default=1024)
     parser.add_argument("--total-sms", type=int, default=132)
     parser.add_argument("--scheduler-sms", type=int, default=4)
-    parser.add_argument("--mirage-skeleton", action="store_true")
     args = parser.parse_args()
 
     worker_config = mk.WorkerConfig.for_device(args.total_sms, scheduler_sms=args.scheduler_sms)
@@ -51,10 +50,7 @@ def main() -> None:
         return
 
     plan = build(args.batch_size).linearize(worker_config=worker_config, batch_size=args.batch_size)
-    if args.mirage_skeleton:
-        print(mk.emit_mirage_skeleton(plan))
-    else:
-        print(plan.graph.to_json())
+    print(plan.graph.to_json())
 
 
 if __name__ == "__main__":

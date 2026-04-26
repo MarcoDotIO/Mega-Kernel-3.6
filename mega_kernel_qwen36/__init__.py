@@ -6,7 +6,6 @@ from .config import (
     qwen36_35b_a3b_config,
     qwen36_layer_type,
 )
-from .mirage_bridge import MirageKernelConfig, emit_mirage_skeleton, mirage_available, persistent_kernel_kwargs
 from .mpk_graph import (
     CompiledPlan,
     EventSpec,
@@ -54,7 +53,6 @@ __all__ = [
     "CompiledPlan",
     "EventSpec",
     "LaunchStep",
-    "MirageKernelConfig",
     "MoeWeights",
     "Qwen36TextConfig",
     "Qwen36VisionConfig",
@@ -74,13 +72,10 @@ __all__ = [
     "build_qwen36_vision_tgraph",
     "decode_layer",
     "dense_ffn_decode",
-    "emit_mirage_skeleton",
     "extension_available",
     "full_attention_decode",
     "linear_attention_decode",
-    "mirage_available",
     "moe_decode",
-    "persistent_kernel_kwargs",
     "qwen36_27b_vision_config",
     "qwen36_27b_config",
     "qwen36_35b_a3b_config",

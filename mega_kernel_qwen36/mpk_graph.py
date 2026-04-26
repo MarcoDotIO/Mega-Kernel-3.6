@@ -275,18 +275,6 @@ class TaskGraph:
         self.tasks = planned_tasks
         return CompiledPlan(graph=self, worker_config=worker_config, launch_steps=tuple(steps), batch_size=batch_size)
 
-    def specialize_batches(
-        self,
-        max_batch: int,
-        builder: Callable[[int], "TaskGraph"],
-        *,
-        worker_config: Optional[WorkerConfig] = None,
-    ) -> dict[int, CompiledPlan]:
-        return {
-            batch: builder(batch).linearize(worker_config=worker_config, batch_size=batch)
-            for batch in _pow2_sizes(max_batch)
-        }
-
     def to_dict(self) -> dict[str, Any]:
         self.event_fusion()
         return {

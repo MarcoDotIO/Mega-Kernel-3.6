@@ -283,8 +283,8 @@ def moe_decode(
     add_residual: bool = True,
     backend: str = "auto",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    if backend not in {"auto", "cuda", "persistent", "grouped", "reference"}:
-        raise ValueError("backend must be one of: auto, cuda, persistent, grouped, reference")
+    if backend not in {"auto", "persistent", "grouped", "reference"}:
+        raise ValueError("backend must be one of: auto, persistent, grouped, reference")
     tensors = (
         x,
         weights.norm_weight,
@@ -304,10 +304,6 @@ def moe_decode(
         return _C.moe_decode_persistent(*tensors, float(eps), int(top_k), bool(add_residual))
     if backend == "persistent":
         raise RuntimeError("persistent CUDA extension is unavailable for moe_decode")
-    if backend in {"auto", "cuda"} and _use_extension(*tensors):
-        return _C.moe_decode(*tensors, float(eps), int(top_k), bool(add_residual))
-    if backend == "cuda":
-        raise RuntimeError("CUDA extension is unavailable for moe_decode")
     return moe_decode_reference(
         x,
         weights.norm_weight,
@@ -339,16 +335,12 @@ def dense_ffn_decode(
         weights.up_weight,
         weights.down_weight,
     )
-    if backend not in {"auto", "cuda", "torch", "triton", "reference"}:
-        raise ValueError("backend must be one of: auto, cuda, torch, triton, reference")
+    if backend not in {"auto", "torch", "triton", "reference"}:
+        raise ValueError("backend must be one of: auto, torch, triton, reference")
     if backend == "auto" and all(t.is_cuda for t in tensors):
         return _dense_ffn_decode_torch(x, weights, eps=eps, add_residual=add_residual)
     if backend == "torch":
         return _dense_ffn_decode_torch(x, weights, eps=eps, add_residual=add_residual)
-    if backend == "cuda" and _use_extension(*tensors):
-        return _C.dense_ffn_decode(*tensors, float(eps), bool(add_residual))
-    if backend == "cuda":
-        raise RuntimeError("CUDA extension is unavailable for dense_ffn_decode")
     if backend == "triton":
         from .triton_ops import dense_ffn_decode_triton
 

@@ -21,8 +21,8 @@ def test_cuda_capability_smoke():
 
 
 @pytest.mark.parametrize("batch", [1, 2, 4, 8])
-@pytest.mark.parametrize("backend", ["auto", "grouped", "persistent", "cuda"])
-def test_moe_decode_cuda_matches_reference(batch, backend):
+@pytest.mark.parametrize("backend", ["auto", "grouped", "persistent"])
+def test_moe_decode_gpu_matches_reference(batch, backend):
     x, weights, top_k = _small_moe(device="cuda", dtype=torch.bfloat16)
     x = x[:1].repeat(batch, 1).contiguous()
     out, idx, router_weights = mk.moe_decode(x, weights, top_k=top_k, backend=backend)
@@ -37,8 +37,8 @@ def test_moe_decode_cuda_matches_reference(batch, backend):
 
 
 @pytest.mark.parametrize("batch", [1, 2, 4, 8])
-@pytest.mark.parametrize("backend", ["auto", "torch", "cuda"])
-def test_dense_ffn_decode_cuda_matches_reference(batch, backend):
+@pytest.mark.parametrize("backend", ["auto", "torch"])
+def test_dense_ffn_decode_gpu_matches_reference(batch, backend):
     x, weights = _small_dense(device="cuda", dtype=torch.bfloat16)
     x = x[:1].repeat(batch, 1).contiguous()
     out = mk.dense_ffn_decode(x, weights, backend=backend)
@@ -49,7 +49,7 @@ def test_dense_ffn_decode_cuda_matches_reference(batch, backend):
     _assert_close_bf16(out.cpu(), ref)
 
 
-def test_moe_decode_cuda_rejects_mixed_weight_dtype():
+def test_moe_decode_rejects_mixed_weight_dtype():
     x, weights, top_k = _small_moe(device="cuda", dtype=torch.bfloat16)
     mixed = mk.MoeWeights(
         norm_weight=weights.norm_weight,
@@ -62,7 +62,7 @@ def test_moe_decode_cuda_rejects_mixed_weight_dtype():
         shared_down=weights.shared_down,
     )
     with pytest.raises(RuntimeError, match="expert_gate dtype mismatch"):
-        mk.moe_decode(x, mixed, top_k=top_k, backend="cuda")
+        mk.moe_decode(x, mixed, top_k=top_k, backend="persistent")
 
 
 def test_dense_ffn_decode_triton_matches_reference():

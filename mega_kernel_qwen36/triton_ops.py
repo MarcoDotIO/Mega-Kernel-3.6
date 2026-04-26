@@ -10,10 +10,6 @@ except Exception:  # pragma: no cover - depends on optional Linux GPU stack.
     tl = None
 
 
-def triton_available() -> bool:
-    return triton is not None
-
-
 if triton is not None:
 
     @triton.jit
